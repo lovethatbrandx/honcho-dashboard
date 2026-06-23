@@ -72,7 +72,7 @@ The repo includes a `docker-compose.yml` ready to go. Edit the environment varia
 ```yaml
 services:
   hombre:
-    build: .
+    image: ghcr.io/lovethatbrandx/hombre/hombre:latest
     ports:
       - "5000:5000"
     environment:
@@ -86,6 +86,13 @@ services:
 Then run:
 
 ```bash
+docker compose up -d
+```
+
+To update:
+
+```bash
+docker compose pull
 docker compose up -d
 ```
 
