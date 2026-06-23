@@ -58,7 +58,7 @@ const App = {
       const wsId = select.value;
       this.state.workspace = this.state.workspaces.find(w => w.id === wsId) || null;
       if (this.state.workspace) {
-        localStorage.setItem('honcho_workspace', wsId);
+        localStorage.setItem('hombre_workspace', wsId);
         await this.loadPeersAndSessions();
         this.renderTab(this.state.activeTab);
       }
@@ -114,7 +114,7 @@ const App = {
       }
       const d = await r.json();
       this.state.workspaces = d.items || [];
-      const savedWs = localStorage.getItem('honcho_workspace');
+      const savedWs = localStorage.getItem('hombre_workspace');
       if (savedWs && this.state.workspaces.find(w => w.id === savedWs)) {
         this.state.workspace = this.state.workspaces.find(w => w.id === savedWs);
       } else if (this.state.workspaces.length > 0) {
@@ -1390,7 +1390,7 @@ const SettingsTab = {
       this.dirty = {};
       this.updateDirtyIndicators(el);
 
-      applyBtn.textContent = 'Waiting for Honcho...';
+      applyBtn.textContent = 'Waiting for server...';
       await this.waitForHealth();
 
       applyBtn.textContent = 'Done';

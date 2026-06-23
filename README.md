@@ -142,7 +142,7 @@ hombre/
 │   └── settings.py        # Settings API endpoints
 ├── static/
 │   ├── index.html         # SPA shell
-│   ├── style.css          # Dark theme (Honcho design system)
+│   ├── style.css          # Dark theme
 │   └── app.js             # Frontend logic (all tabs, modal, settings)
 ├── requirements.txt
 ├── Dockerfile

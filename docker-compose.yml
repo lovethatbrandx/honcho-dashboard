@@ -5,8 +5,8 @@ services:
       - "5000:5000"
     environment:
       - HONCHO_URL=http://host.docker.internal:8000
-      - HONCHO_ENV_PATH=/home/reposed/docker/honcho/.env
-      - HONCHO_COMPOSE_DIR=/home/reposed/docker/honcho
+      - HONCHO_ENV_PATH=/path/to/honcho/.env
+      - HONCHO_COMPOSE_DIR=/path/to/honcho
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
