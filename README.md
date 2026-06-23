@@ -1,6 +1,4 @@
-# Hombre
-
-<img src="static/icon.svg" width="64" height="64" alt="Hombre icon">
+<img src="static/hombre_logo.jpg" alt="Hombre" width="400">
 
 > A self-hosted web UI for Honcho, because the official dashboard isn't self-hostable.
 
