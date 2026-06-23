@@ -1,5 +1,7 @@
 # Hombre
 
+<img src="static/icon.svg" width="64" height="64" alt="Hombre icon">
+
 > A self-hosted web UI for Honcho, because the official dashboard isn't self-hostable.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
