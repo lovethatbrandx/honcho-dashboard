@@ -24,13 +24,22 @@ Built entirely with AI coding tools ([OpenCode](https://opencode.ai) + [MiMo](ht
 
 ## Features
 
-- **Overview** - workspace stats, peer/session/conclusion counts at a glance
-- **Peers** - list participants, view representations and peer cards
-- **Sessions** - list conversations, view messages and summaries
-- **Chat** - ask questions about a peer using natural language; Honcho reasons over their accumulated memory (conclusions, representations, messages) and synthesizes an answer with streaming and adjustable reasoning depth
-- **Conclusions** - browse and semantic search reasoning/memory
-- **Messages** - browse messages across all sessions
-- **Settings** - configure LLM providers, embedding models, dialectic levels, and more
+- **Overview** — workspace stats, peer/session/conclusion counts at a glance
+- **Peers** — list participants, view representations and peer cards, compare peers side-by-side
+- **Sessions** — list conversations, view messages and summaries
+- **Chat** — ask questions about a peer using natural language with streaming responses and typing indicator; adjustable reasoning depth
+- **Conclusions** — browse and semantic search reasoning/memory with pagination and type filtering
+- **Messages** — browse messages across all sessions with pagination
+- **Settings** — configure LLM providers, embedding models, dialectic levels, and more
+
+### Additional Features
+
+- **Soft Delete** — delete peers, messages, and conclusions (Honcho doesn't support native delete)
+- **Export/Import** — export workspace data to portable JSON, import with conflict resolution
+- **Notifications** — real-time notification bell for workspace events and new conclusions
+- **Security** — role-based access control (admin/editor/viewer), rate limiting, audit logging
+- **Typing Indicator** — animated dots while the model is thinking
+- **Pagination** — load-more pattern for conclusions and messages
 
 ## Prerequisites
 
@@ -116,6 +125,9 @@ docker compose up -d
 | `HONCHO_COMPOSE_DIR` | No | *(empty)* | Docker Compose working directory for Honcho server |
 | `DASHBOARD_USER` | No | *(empty)* | HTTP Basic Auth username (empty = no auth) |
 | `DASHBOARD_PASSWORD` | No | *(empty)* | HTTP Basic Auth password (empty = no auth) |
+| `DASHBOARD_ROLE` | No | `admin` | Role for single-user mode: `admin`, `editor`, or `viewer` |
+| `DASHBOARD_USERS` | No | *(empty)* | Multi-user config: `user1:pass1:admin,user2:pass2:viewer` |
+| `HOMBRE_LOG_DIR` | No | `logs` | Directory for access and audit logs |
 
 > **Note:** `HONCHO_ENV_PATH` and `HONCHO_COMPOSE_DIR` are optional. The app starts without them, but the Settings tab won't work until they're set.
 
@@ -125,12 +137,12 @@ The settings tab reads and writes the Honcho `.env` configuration file. Changes 
 
 ### Configurable Sections
 
-- **LLM Provider** - API key
-- **Embeddings** - model, base URL, transport, vector dimensions
-- **Deriver** - background worker model config
-- **Dialectic Levels** - minimal/low/medium/high/max reasoning levels
-- **Summary** - summary generation model config
-- **Dream** - deduction and induction model configs
+- **LLM Provider** — API key
+- **Embeddings** — model, base URL, transport, vector dimensions
+- **Deriver** — background worker model config
+- **Dialectic Levels** — minimal/low/medium/high/max reasoning levels
+- **Summary** — summary generation model config
+- **Dream** — deduction and induction model configs
 
 ### How It Works
 
@@ -142,27 +154,45 @@ The settings tab reads and writes the Honcho `.env` configuration file. Changes 
 
 ## Security
 
-- **Basic Auth** - Set `DASHBOARD_USER` and `DASHBOARD_PASSWORD` to enable HTTP Basic Auth. Without these, the dashboard is unauthenticated.
-- **Bind address** - Binds to `0.0.0.0:5000` (all interfaces). Use a firewall or reverse proxy for production.
-- **API key exposure** - The LLM API key is visible in the settings tab. Make sure the dashboard isn't publicly accessible.
-- **Path traversal** - Proxy validates and URL-decodes paths before forwarding.
-- **Security headers** - CSP, X-Content-Type-Options, X-Frame-Options.
-
-## Contributing
-
-Contributions welcome. The whole thing was built with AI tools, so feel free to do the same.
+- **Basic Auth** — Set `DASHBOARD_USER` and `DASHBOARD_PASSWORD` to enable HTTP Basic Auth. Without these, the dashboard is unauthenticated.
+- **Role-Based Access** — Three roles: `admin` (full access), `editor` (create/edit/read), `viewer` (read-only). Configure via `DASHBOARD_ROLE` or `DASHBOARD_USERS`.
+- **Rate Limiting** — In-memory sliding window rate limiter. Returns 429 with Retry-After header.
+- **Audit Logging** — All settings changes logged to `logs/audit.log` with username and changed keys.
+- **Request Logging** — All API requests logged to `logs/access.log` with timing and user info.
+- **Bind address** — Binds to `0.0.0.0:5000` (all interfaces). Use a firewall or reverse proxy for production.
+- **API key exposure** — The LLM API key is visible in the settings tab. Make sure the dashboard isn't publicly accessible.
+- **Path traversal** — Proxy validates and URL-decodes paths before forwarding.
+- **Security headers** — CSP, HSTS, X-Content-Type-Options, X-Frame-Options, X-XSS-Protection.
 
 ## Project Structure
 
 ```
 hombre/
-├── app.py                 # FastAPI backend (auth, proxy, routes)
+├── app.py                      # FastAPI backend (auth, proxy, routes, pagination)
 ├── routes/
-│   └── settings.py        # Settings API endpoints
+│   ├── __init__.py
+│   ├── security.py             # Security middleware (RBAC, rate limiting, logging)
+│   ├── settings.py             # Settings API (read/write .env, restart)
+│   ├── deletes.py              # Soft-delete registry
+│   ├── notifications.py        # Notification system
+│   └── export.py               # Export/Import API
 ├── static/
-│   ├── index.html         # SPA shell
-│   ├── style.css          # Dark theme
-│   └── app.js             # Frontend logic (all tabs, modal, settings)
+│   ├── index.html              # SPA shell with notification bell
+│   ├── style.css               # Dark theme CSS
+│   ├── app.js                  # Frontend logic (all tabs, modal, notifications)
+│   ├── icon.svg                # App icon
+│   ├── hombre_logo.jpg         # Sidebar logo
+│   └── app_screenshot.png      # Screenshot for README
+├── docs/
+│   ├── API.md                  # Complete API reference
+│   ├── FEATURES.md             # Feature documentation
+│   └── DEPLOYMENT.md           # Deployment guide
+├── data/                       # Auto-created at runtime
+│   ├── deleted.json            # Soft-deleted resource IDs
+│   └── notifications.json      # Recent notifications
+├── logs/                       # Auto-created at runtime
+│   ├── access.log              # Request logs
+│   └── audit.log               # Settings change logs
 ├── requirements.txt
 ├── Dockerfile
 └── docker-compose.yml

@@ -20,19 +20,32 @@ docker compose up -d
 # Check syntax
 python3 -m py_compile app.py
 python3 -m py_compile routes/settings.py
+python3 -m py_compile routes/security.py
+python3 -m py_compile routes/deletes.py
+python3 -m py_compile routes/notifications.py
+python3 -m py_compile routes/export.py
 node --check static/app.js
 ```
 
 ## File Locations
 
-- `app.py` — FastAPI backend (auth, proxy, health, chat streaming via `/api/workspaces/{wid}/peers/{pid}/chat`)
+- `app.py` — FastAPI backend (auth, proxy, health, chat streaming, pagination helpers)
 - `routes/__init__.py` — Package marker
-- `routes/settings.py` — Settings API (read/write `.env`, restart containers)
-- `static/app.js` — All frontend logic (7 tab modules, Modal, App)
+- `routes/security.py` — Security middleware (rate limiting, RBAC auth, request logging, security headers)
+- `routes/settings.py` — Settings API (read/write `.env`, restart containers, audit logging)
+- `routes/deletes.py` — Soft-delete registry for peers/messages/conclusions
+- `routes/notifications.py` — Notification system for workspace events
+- `routes/export.py` — Export/Import API (workspace data to/from portable JSON)
+- `data/deleted.json` — Soft-deleted resource IDs (auto-created)
+- `data/notifications.json` — Recent notifications (auto-created)
+- `static/app.js` — All frontend logic (7 tab modules, Modal, App, notifications)
 - `static/style.css` — Dark theme CSS
-- `static/index.html` — SPA shell with sidebar nav
+- `static/index.html` — SPA shell with sidebar nav and notification bell
 - `Dockerfile` — Python 3.12-slim, EXPOSE 5000
 - `docker-compose.yml` — Port 5000:5000, healthcheck
+- `docs/API.md` — Complete API reference (all endpoints, request/response formats)
+- `docs/FEATURES.md` — Feature documentation (workspace, peers, sessions, chat, conclusions, export/import)
+- `docs/DEPLOYMENT.md` — Deployment guide (Docker, local dev, env vars, troubleshooting)
 
 ## Conventions
 
@@ -41,6 +54,7 @@ node --check static/app.js
 - XSS prevention: always use `App.escapeHtml()` / `App.escapeAttr()` in templates
 - Event delegation pattern for click handlers (no inline onclick)
 - Modal utility: `Modal.show()`, `Modal.confirm()`, `Modal.close()`
+- Toast notifications: `App.toast(message, type)` for user feedback
 - Tabs: `OverviewTab`, `PeersTab`, `SessionsTab`, `ChatTab`, `ConclusionsTab`, `MessagesTab`, `SettingsTab`
 - Each tab fetches its own data directly from the API (no shared state dependency)
 - OverviewTab fetches peers/sessions/conclusions independently on render
@@ -53,6 +67,41 @@ node --check static/app.js
 - Workspace delete: `DELETE /v3/workspaces/{wid}` (requires deleting all sessions first)
 - Session delete: `DELETE /v3/workspaces/{wid}/sessions/{sid}`
 - No peer delete endpoint exists in Honcho API
+- No message delete endpoint exists in Honcho API
+- No conclusion delete endpoint exists in Honcho API
+
+## Honcho API Limitations — DELETE Operations
+
+| Resource     | DELETE Supported? | Workaround              |
+|-------------|-------------------|-------------------------|
+| Workspace   | Yes               | Must delete sessions first |
+| Session     | Yes               | None needed             |
+| Peer        | No                | Soft-delete locally (`routes/deletes.py`) |
+| Message     | No                | Soft-delete locally (`routes/deletes.py`) |
+| Conclusion  | No                | Soft-delete locally (`routes/deletes.py`) |
+
+## New API Endpoints (Hombre-specific, not proxied to Honcho)
+
+### Soft Delete (`routes/deletes.py`)
+- `POST /api/soft-delete` — Mark resource as deleted (body: `{type, id, workspace_id}`)
+- `POST /api/soft-delete/check` — Check if resources are deleted (body: `{type, ids, workspace_id}`)
+- `GET /api/soft-delete/list` — List deleted resources (optional `?type=` filter)
+- `POST /api/soft-delete/restore` — Restore a deleted resource
+
+### Pagination Helpers (`app.py`)
+- `POST /api/workspaces/{wid}/conclusions/list/all` — Fetch ALL conclusions (paginated, up to 5000)
+- `POST /api/workspaces/{wid}/sessions/{sid}/messages/list/all` — Fetch ALL messages (paginated, up to 5000)
+
+### Notifications (`routes/notifications.py`)
+- `GET /api/notifications` — Get active notifications (optional `?type=`, `?workspace_id=`)
+- `POST /api/notifications/dismiss` — Dismiss a notification (body: `{id}`)
+
+### Export/Import (`routes/export.py`)
+- `POST /api/export/workspace/{wid}` — Export entire workspace (peers, sessions, conclusions, messages)
+- `POST /api/export/peer/{wid}/{pid}` — Export single peer's data (info, representation, card, conclusions)
+- `POST /api/export/conclusions/{wid}` — Export all conclusions for workspace
+- `POST /api/export/import/workspace` — Upload JSON export file for preview and conflict detection (multipart form)
+- `POST /api/export/import/confirm` — Confirm import with conflict resolution (body: `{workspace_id, data, id_mapping, conflict_strategy}`)
 
 ## Environment
 
@@ -60,12 +109,71 @@ node --check static/app.js
 - `HONCHO_API_KEY` — API key for Honcho auth
 - `HONCHO_ENV_PATH` — Path to `.env` file (optional, settings tab returns 403 if unset)
 - `HONCHO_COMPOSE_DIR` — Docker Compose dir (optional, settings tab returns 403 if unset)
-- `DASHBOARD_USER` / `DASHBOARD_PASSWORD` — Optional basic auth (empty = no auth, startup warning)
+- `DASHBOARD_USER` / `DASHBOARD_PASSWORD` — Single-user basic auth (backward compat)
+- `DASHBOARD_ROLE` — Role for single user (default: `admin`)
+- `DASHBOARD_USERS` — Multi-user config: `user1:pass1:admin,user2:pass2:viewer`
+- `HOMBRE_LOG_DIR` — Log directory (default: `logs`)
 
 ## Security Notes
 
+### Authentication & RBAC
+
+- **Roles**: `admin` (full), `editor` (create/edit/read), `viewer` (read-only)
+- Single-user mode: `DASHBOARD_USER` + `DASHBOARD_PASSWORD` + `DASHBOARD_ROLE`
+- Multi-user mode: `DASHBOARD_USERS=user1:pass1:admin,user2:pass2:viewer`
+- No auth configured → open access (with startup warning)
 - Basic Auth uses `hmac.compare_digest` for timing-safe comparison
-- Path traversal: iterative URL-decoding + `..`/`\x00`/leading-`/` checks
-- Security headers: CSP (with `script-src 'self'`), X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy
-- Settings write: WRITABLE_KEYS allowlist, newline injection prevention, backup on every write
+- Role checked per-request: settings/write endpoints require `settings` permission, DELETE requires `delete` permission
+
+### Rate Limiting (in-memory, resets on restart)
+
+| Endpoint | Limit |
+|---|---|
+| `/api/settings/*` | 5 req/min |
+| `/api/workspaces/*` | 5 req/min |
+| `/api/peers/*` | 30 req/min |
+| `/api/sessions/*` | 30 req/min |
+| `/api/messages/*` | 30 req/min |
+| `/api/chat` | 5 req/min |
+| Everything else | 60 req/min |
+
+- Returns `429 Too Many Requests` with `Retry-After` header
+- Rate limit key: client IP + auth token prefix
+
+### Request Logging
+
+- All API requests logged to `logs/access.log`
+- Format: `ISO_TIMESTAMP METHOD STATUS DURATION path user=NAME detail`
+- Rotates at 5 MB, keeps last 5 rotated files
+- Static asset requests are not logged
+
+### Audit Logging
+
+- Settings operations logged to `logs/audit.log`
+- Tracks: `settings.read`, `settings.write`, `settings.backup`, `settings.restore`, `settings.restart`
+- Includes username and changed keys
+
+### Security Headers
+
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `X-XSS-Protection: 1; mode=block`
+- `Strict-Transport-Security` (HTTPS only)
+- `Content-Security-Policy`: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src self fonts.googleapis.com fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+
+### Path Traversal Protection
+
+- Iterative URL-decoding + `..`/`\x00`/leading-`/` checks
+
+### Settings Write Protection
+
+- `WRITABLE_KEYS` allowlist (only known env keys)
+- Newline injection prevention (`sanitize_value`)
+- Backup created on every write
+- Audit log records who changed what
+
+### Frontend
+
 - `App.escapeHtml()` escapes `'` to `&#39;` (prevents attribute injection)

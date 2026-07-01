@@ -11,6 +11,7 @@ const App = {
     this.bindNav();
     this.bindEventDelegation();
     this.bindWorkspaceSelect();
+    this.initNotifications();
     await this.checkHealth();
     await this.loadWorkspaces();
     await this.loadPeersAndSessions();
@@ -44,6 +45,12 @@ const App = {
       else if (action === 'search-conclusions') ConclusionsTab.search();
       else if (action === 'load-messages') MessagesTab.load();
       else if (action === 'send-chat') ChatTab.send();
+      else if (action === 'load-more-conclusions') ConclusionsTab.loadMore();
+      else if (action === 'load-more-messages') MessagesTab.loadMore();
+      else if (action === 'delete-conclusion') ConclusionsTab.deleteItem(id, btn);
+      else if (action === 'delete-message') MessagesTab.deleteItem(id, btn);
+      else if (action === 'delete-peer') PeersTab.deletePeer(id, btn);
+      else if (action === 'compare-peers') PeersTab.openCompare();
     });
 
     document.getElementById('modal-root').addEventListener('click', (e) => {
@@ -193,6 +200,161 @@ const App = {
 
   escapeAttr(s) {
     return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  },
+
+  /* ─── Toast Notifications ─── */
+  toast(message, type = 'info') {
+    let container = document.querySelector('.toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.className = 'toast-container';
+      document.body.appendChild(container);
+    }
+
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+
+    setTimeout(() => {
+      toast.classList.add('toast-exit');
+      toast.addEventListener('animationend', () => toast.remove());
+    }, 3000);
+  },
+
+  /* ─── Soft Delete ─── */
+  async softDelete(type, id) {
+    const ws = this.state.workspace;
+    if (!ws) return;
+    try {
+      await this.api('soft-delete', { body: { type, id, workspace_id: ws.id } });
+      this.toast(`${type.charAt(0).toUpperCase() + type.slice(1)} deleted`, 'success');
+      return true;
+    } catch (e) {
+      this.toast(`Delete failed: ${e.message}`, 'error');
+      return false;
+    }
+  },
+
+  /* ─── Notifications ─── */
+  notificationPollInterval: null,
+
+  initNotifications() {
+    const bell = document.getElementById('notification-bell');
+    const panel = document.getElementById('notification-panel');
+    const clearBtn = document.getElementById('notification-clear');
+
+    if (!bell || !panel) return;
+
+    bell.addEventListener('click', (e) => {
+      e.stopPropagation();
+      panel.classList.toggle('hidden');
+      if (!panel.classList.contains('hidden')) {
+        this.loadNotifications();
+      }
+    });
+
+    bell.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        bell.click();
+      }
+    });
+
+    clearBtn.addEventListener('click', () => this.clearAllNotifications());
+
+    // Close panel when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!panel.contains(e.target) && !bell.contains(e.target)) {
+        panel.classList.add('hidden');
+      }
+    });
+
+    // Poll for notifications every 30 seconds
+    this.pollNotifications();
+    this.notificationPollInterval = setInterval(() => this.pollNotifications(), 30000);
+  },
+
+  async pollNotifications() {
+    try {
+      const data = await this.api('notifications', { method: 'GET' });
+      const notifications = data.items || [];
+      const badge = document.getElementById('notification-badge');
+      if (badge) {
+        if (notifications.length > 0) {
+          badge.textContent = notifications.length > 9 ? '9+' : notifications.length;
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+      }
+      this.state.notifications = notifications;
+    } catch {
+      // Silently fail - notifications are non-critical
+    }
+  },
+
+  async loadNotifications() {
+    const list = document.getElementById('notification-list');
+    if (!list) return;
+
+    const notifications = this.state.notifications || [];
+
+    if (notifications.length === 0) {
+      list.innerHTML = '<div class="text-xs text-muted" style="padding:12px;text-align:center">No notifications</div>';
+      return;
+    }
+
+    list.innerHTML = notifications.map(n => `
+      <div class="notification-item" data-id="${this.escapeAttr(n.id)}">
+        <div class="notification-icon">${this.getNotificationIcon(n.type)}</div>
+        <div class="notification-content">
+          <div class="notification-message">${this.escapeHtml(n.message)}</div>
+          <div class="notification-time">${this.formatDateTime(n.created_at)}</div>
+        </div>
+        <button class="notification-dismiss" data-action="dismiss-notification" data-id="${this.escapeAttr(n.id)}" aria-label="Dismiss">&times;</button>
+      </div>
+    `).join('');
+
+    // Bind dismiss buttons
+    list.querySelectorAll('[data-action="dismiss-notification"]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.dismissNotification(btn.dataset.id);
+      });
+    });
+  },
+
+  getNotificationIcon(type) {
+    const icons = {
+      'conclusion_created': '&#128161;',
+      'workspace_event': '&#128193;',
+      'info': '&#8505;&#65039;',
+    };
+    return icons[type] || icons['info'];
+  },
+
+  async dismissNotification(id) {
+    try {
+      await this.api('notifications/dismiss', { body: { id } });
+      this.state.notifications = (this.state.notifications || []).filter(n => n.id !== id);
+      this.loadNotifications();
+      this.pollNotifications();
+    } catch {
+      this.toast('Failed to dismiss notification', 'error');
+    }
+  },
+
+  async clearAllNotifications() {
+    const notifications = this.state.notifications || [];
+    for (const n of notifications) {
+      try {
+        await this.api('notifications/dismiss', { body: { id: n.id } });
+      } catch {}
+    }
+    this.state.notifications = [];
+    this.loadNotifications();
+    this.pollNotifications();
   }
 };
 
@@ -266,6 +428,195 @@ const Modal = {
   }
 };
 
+/* ─── Export/Import Helpers ─── */
+const ExportImport = {
+  async exportWorkspace(wsId) {
+    const btn = document.getElementById('export-workspace-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Exporting...';
+    }
+
+    try {
+      const response = await fetch(`/api/export/workspace/${encodeURIComponent(wsId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (!response.ok) {
+        let msg = `Export failed: ${response.status}`;
+        try { const e = await response.json(); msg = e.detail || msg; } catch {}
+        throw new Error(msg);
+      }
+
+      const data = await response.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hombre-export-${wsId}-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      if (btn) {
+        btn.textContent = 'Exported!';
+        setTimeout(() => { btn.textContent = 'Export Workspace'; btn.disabled = false; }, 2000);
+      }
+    } catch (e) {
+      if (btn) {
+        btn.textContent = 'Failed';
+        setTimeout(() => { btn.textContent = 'Export Workspace'; btn.disabled = false; }, 2000);
+      }
+      alert(`Export failed: ${e.message}`);
+    }
+  },
+
+  async importWorkspace(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await fetch('/api/export/import/workspace', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        let msg = `Import preview failed: ${response.status}`;
+        try { const e = await response.json(); msg = e.detail || msg; } catch {}
+        throw new Error(msg);
+      }
+
+      return await response.json();
+    } catch (e) {
+      alert(`Import preview failed: ${e.message}`);
+      return null;
+    }
+  },
+
+  async confirmImport(workspaceId, data, strategy, idMapping) {
+    try {
+      const response = await fetch('/api/export/import/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          data: data,
+          conflict_strategy: strategy,
+          id_mapping: idMapping || {},
+        }),
+      });
+
+      if (!response.ok) {
+        let msg = `Import failed: ${response.status}`;
+        try { const e = await response.json(); msg = e.detail || msg; } catch {}
+        throw new Error(msg);
+      }
+
+      return await response.json();
+    } catch (e) {
+      alert(`Import failed: ${e.message}`);
+      return null;
+    }
+  },
+
+  showImportPreview(preview) {
+    const conflictItems = [];
+    if (preview.conflicts.peer_conflicts.length > 0) {
+      conflictItems.push(`<div class="mb-2"><strong>Peer conflicts:</strong> ${preview.conflicts.peer_conflicts.map(id => `<code>${App.escapeHtml(id)}</code>`).join(', ')}</div>`);
+    }
+    if (preview.conflicts.session_conflicts.length > 0) {
+      conflictItems.push(`<div class="mb-2"><strong>Session conflicts:</strong> ${preview.conflicts.session_conflicts.map(id => `<code>${App.escapeHtml(id)}</code>`).join(', ')}</div>`);
+    }
+    if (preview.conflicts.workspace_exists) {
+      conflictItems.push(`<div class="mb-2"><strong>Note:</strong> Target workspace <code>${App.escapeHtml(preview.source_workspace)}</code> already exists</div>`);
+    }
+
+    const bodyParts = [];
+    const summary = document.createElement('div');
+    summary.innerHTML = `
+      <div class="mb-3">
+        <div class="text-sm text-muted mb-2">Export from <code>${App.escapeHtml(preview.source_workspace)}</code> (${App.formatDate(preview.export_date)})</div>
+        <div class="flex gap-4">
+          <div><strong>${preview.summary.peers}</strong> peers</div>
+          <div><strong>${preview.summary.sessions}</strong> sessions</div>
+          <div><strong>${preview.summary.conclusions}</strong> conclusions</div>
+          <div><strong>${preview.summary.message_sessions}</strong> message sessions</div>
+        </div>
+      </div>
+    `;
+    bodyParts.push(summary);
+
+    if (preview.conflicts.has_conflicts) {
+      const conflicts = document.createElement('div');
+      conflicts.className = 'mb-3';
+      conflicts.innerHTML = `
+        <div class="text-sm font-medium mb-2" style="color:var(--amber)">Conflicts Detected</div>
+        ${conflictItems.join('')}
+        <div class="text-xs text-muted mt-2">Choose a conflict resolution strategy below.</div>
+      `;
+      bodyParts.push(conflicts);
+    } else {
+      const noConflicts = document.createElement('div');
+      noConflicts.className = 'mb-3';
+      noConflicts.innerHTML = '<div class="text-sm" style="color:var(--green)">No conflicts detected. Ready to import.</div>';
+      bodyParts.push(noConflicts);
+    }
+
+    // Strategy selector
+    const strategyDiv = document.createElement('div');
+    strategyDiv.innerHTML = `
+      <label class="text-xs font-medium text-muted mb-1">Conflict Resolution</label>
+      <select class="input mt-1" id="import-strategy">
+        <option value="skip">Skip conflicting resources</option>
+        <option value="rename">Rename with -imported suffix</option>
+        <option value="overwrite">Overwrite existing resources</option>
+      </select>
+    `;
+    bodyParts.push(strategyDiv);
+
+    Modal.show('Import Preview', bodyParts, async () => {
+      const strategy = document.getElementById('import-strategy').value;
+      Modal.close();
+
+      // Show progress
+      const progressDiv = document.createElement('div');
+      progressDiv.innerHTML = '<div class="loading-overlay"><div class="spinner"></div> Importing...</div>';
+      document.getElementById('modal-root').appendChild(progressDiv);
+
+      const result = await ExportImport.confirmImport(preview.source_workspace, preview.data, strategy);
+      progressDiv.remove();
+
+      if (result) {
+        const notesHtml = result.notes.length > 0
+          ? `<div class="mt-3"><div class="text-xs text-muted mb-1">Notes</div>${result.notes.map(n => `<div class="text-xs mb-1">- ${App.escapeHtml(n)}</div>`).join('')}</div>`
+          : '';
+
+        const resultParts = [];
+        const resultDiv = document.createElement('div');
+        resultDiv.innerHTML = `
+          <div class="mb-2">
+            <strong>${result.imported.peers_created.length}</strong> peers created,
+            <strong>${result.imported.peers_skipped.length}</strong> skipped
+          </div>
+          <div class="mb-2">
+            <strong>${result.imported.sessions_created.length}</strong> sessions created,
+            <strong>${result.imported.sessions_skipped.length}</strong> skipped
+          </div>
+          ${result.imported.errors.length > 0 ? `<div class="mb-2" style="color:var(--destructive)">${result.imported.errors.length} errors</div>` : ''}
+          ${notesHtml}
+        `;
+        resultParts.push(resultDiv);
+
+        Modal.show('Import Complete', resultParts, () => {
+          Modal.close();
+          App.loadWorkspaces().then(() => App.renderTab(App.state.activeTab));
+        }, { confirmText: 'Done' });
+      }
+    }, { confirmText: 'Import', confirmClass: 'btn btn-primary' });
+  }
+};
+
 /* ─── Overview Tab ─── */
 const OverviewTab = {
   async render(el) {
@@ -327,6 +678,19 @@ const OverviewTab = {
       <div class="card">
         <div class="card-header">
           <div>
+            <div class="card-title">Export / Import</div>
+            <div class="card-subtitle">Backup and restore workspace data</div>
+          </div>
+        </div>
+        <div class="flex gap-2 p-3">
+          <button class="btn btn-primary" id="export-workspace-btn">Export Workspace</button>
+          <button class="btn btn-ghost" id="import-workspace-btn">Import Workspace</button>
+          <input type="file" id="import-file-input" accept=".json" style="display:none">
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div>
             <div class="card-title">All Workspaces</div>
             <div class="card-subtitle">${App.state.workspaces.length} total</div>
           </div>
@@ -370,6 +734,32 @@ const OverviewTab = {
         });
       });
     });
+
+    // Export/Import handlers
+    const exportBtn = document.getElementById('export-workspace-btn');
+    const importBtn = document.getElementById('import-workspace-btn');
+    const fileInput = document.getElementById('import-file-input');
+
+    if (exportBtn) {
+      exportBtn.addEventListener('click', () => ExportImport.exportWorkspace(ws.id));
+    }
+
+    if (importBtn) {
+      importBtn.addEventListener('click', () => fileInput.click());
+    }
+
+    if (fileInput) {
+      fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        fileInput.value = '';
+
+        const preview = await ExportImport.importWorkspace(file);
+        if (preview) {
+          ExportImport.showImportPreview(preview);
+        }
+      });
+    }
   }
 };
 
@@ -408,6 +798,10 @@ const PeersTab = {
       return;
     }
 
+    const compareBtnHtml = App.state.peers.length >= 2
+      ? `<button class="btn btn-ghost" data-action="compare-peers">Compare</button>`
+      : '';
+
     el.innerHTML = `
       <div class="tab-header">
         <div class="flex items-center justify-between">
@@ -415,7 +809,10 @@ const PeersTab = {
             <h2>Peers</h2>
             <p>${App.state.peers.length} participant${App.state.peers.length !== 1 ? 's' : ''}</p>
           </div>
-          <button class="btn btn-primary" id="create-peer-btn">+ New Peer</button>
+          <div class="flex gap-2">
+            ${compareBtnHtml}
+            <button class="btn btn-primary" id="create-peer-btn">+ New Peer</button>
+          </div>
         </div>
       </div>
       <div class="table-wrap">
@@ -426,8 +823,9 @@ const PeersTab = {
               <tr class="clickable" data-peer="${App.escapeAttr(p.id)}">
                 <td><code>${App.escapeHtml(p.id)}</code></td>
                 <td class="mono">${App.formatDate(p.created_at)}</td>
-                <td>
+                <td class="flex gap-2">
                   <button class="btn btn-ghost btn-sm" data-action="toggle-card" data-id="${App.escapeAttr(p.id)}">Card</button>
+                  <button class="btn-delete-inline" data-action="delete-peer" data-id="${App.escapeAttr(p.id)}" title="Delete peer">&times;</button>
                 </td>
               </tr>
               <tr class="hidden" id="peer-expand-${App.escapeHtml(p.id)}">
@@ -478,6 +876,104 @@ const PeersTab = {
       await App.loadPeersAndSessions();
       App.renderTab(App.state.activeTab);
     });
+  },
+
+  async deletePeer(id, btnEl) {
+    const ws = App.state.workspace;
+    Modal.confirm('Delete Peer', `Delete peer "${id}"? This is a soft-delete — the peer will be hidden from the UI.`, async () => {
+      const ok = await App.softDelete('peer', id);
+      if (ok) {
+        Modal.close();
+        // Gray out or hide the peer
+        const row = document.querySelector(`tr[data-peer="${id}"]`);
+        const expandRow = document.getElementById(`peer-expand-${id}`);
+        if (row) {
+          row.classList.add('peer-soft-deleted');
+          row.classList.remove('clickable');
+        }
+        if (expandRow) expandRow.classList.add('hidden');
+        // Remove from peers list so it won't show on re-render
+        App.state.peers = App.state.peers.filter(p => p.id !== id);
+      }
+    });
+  },
+
+  openCompare() {
+    const peers = App.state.peers;
+    if (peers.length < 2) {
+      App.toast('Need at least 2 peers to compare', 'warning');
+      return;
+    }
+
+    const select1 = document.createElement('select');
+    select1.className = 'input';
+    select1.id = 'compare-peer-1';
+    select1.innerHTML = `<option value="">Select peer...</option>${peers.map(p => `<option value="${App.escapeHtml(p.id)}">${App.escapeHtml(p.id)}</option>`).join('')}`;
+
+    const select2 = document.createElement('select');
+    select2.className = 'input';
+    select2.id = 'compare-peer-2';
+    select2.innerHTML = `<option value="">Select peer...</option>${peers.map(p => `<option value="${App.escapeHtml(p.id)}">${App.escapeHtml(p.id)}</option>`).join('')}`;
+
+    const selectContainer = document.createElement('div');
+    selectContainer.className = 'comparison-selects';
+    selectContainer.appendChild(select1);
+    selectContainer.appendChild(select2);
+
+    const pane1 = document.createElement('div');
+    pane1.className = 'comparison-pane';
+    pane1.id = 'compare-pane-1';
+    pane1.innerHTML = '<div class="text-sm text-muted">Select a peer above</div>';
+
+    const pane2 = document.createElement('div');
+    pane2.className = 'comparison-pane';
+    pane2.id = 'compare-pane-2';
+    pane2.innerHTML = '<div class="text-sm text-muted">Select a peer above</div>';
+
+    const grid = document.createElement('div');
+    grid.className = 'comparison-container';
+    grid.appendChild(pane1);
+    grid.appendChild(pane2);
+
+    const container = document.createElement('div');
+    container.appendChild(selectContainer);
+    container.appendChild(grid);
+
+    Modal.show('Compare Peers', container, () => { Modal.close(); });
+
+    // Bind change events after modal is shown
+    const loadPeer = async (peerId, paneId) => {
+      const pane = document.getElementById(paneId);
+      if (!peerId || !pane) {
+        if (pane) pane.innerHTML = '<div class="text-sm text-muted">Select a peer above</div>';
+        return;
+      }
+      const ws = App.state.workspace;
+      pane.innerHTML = '<div class="loading-overlay"><div class="spinner"></div></div>';
+
+      try {
+        const [repr, card] = await Promise.all([
+          App.api(`workspaces/${ws.id}/peers/${peerId}/representation`, { body: {} }),
+          App.api(`workspaces/${ws.id}/peers/${peerId}/card`, { method: 'GET' }),
+        ]);
+
+        let html = `<div class="comparison-pane-header">${App.escapeHtml(peerId)}</div>`;
+        html += `<div class="text-xs font-medium text-muted">Representation</div>`;
+        html += `<div class="representation-box">${App.escapeHtml(repr.representation || 'No representation yet')}</div>`;
+        html += `<div class="text-xs font-medium text-muted mt-2">Card</div>`;
+        if (card.peer_card && card.peer_card.length > 0) {
+          html += `<div class="peer-card-list">${card.peer_card.map(c => `<div class="peer-card-item">${App.escapeHtml(c)}</div>`).join('')}</div>`;
+        } else {
+          html += '<div class="text-sm text-muted">No card yet</div>';
+        }
+        pane.innerHTML = html;
+      } catch {
+        pane.innerHTML = '<div class="text-sm text-muted">Failed to load peer data</div>';
+      }
+    };
+
+    select1.addEventListener('change', () => loadPeer(select1.value, 'compare-pane-1'));
+    select2.addEventListener('change', () => loadPeer(select2.value, 'compare-pane-2'));
   },
 
   async toggleCard(peerId) {
@@ -787,8 +1283,13 @@ const ChatTab = {
     this.streaming = true;
     document.getElementById('chat-send').disabled = true;
 
-    const msgEl = this.addMessage('assistant', '');
+    // Show typing indicator
+    const typingEl = this.addMessage('assistant', '');
+    typingEl.classList.add('typing');
+    typingEl.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
+
     const ws = App.state.workspace;
+    let gotFirstChunk = false;
 
     try {
       const body = { query, stream: true, reasoning_level: reasoning };
@@ -824,28 +1325,47 @@ const ChatTab = {
               const parsed = JSON.parse(data);
               const chunk = parsed.delta?.content || parsed.content || '';
               if (chunk) {
+                // Remove typing indicator on first chunk
+                if (!gotFirstChunk) {
+                  typingEl.classList.remove('typing');
+                  typingEl.innerHTML = '';
+                  gotFirstChunk = true;
+                }
                 content += chunk;
-                msgEl.textContent = content;
+                typingEl.textContent = content;
                 const now = Date.now();
                 if (now - lastScroll > 100) {
-                  msgEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                  typingEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
                   lastScroll = now;
                 }
               }
             } catch {
+              // Remove typing indicator on first chunk
+              if (!gotFirstChunk) {
+                typingEl.classList.remove('typing');
+                typingEl.innerHTML = '';
+                gotFirstChunk = true;
+              }
               content += data;
-              msgEl.textContent = content;
+              typingEl.textContent = content;
             }
           } else if (line.trim() && !line.startsWith(':')) {
+            // Remove typing indicator on first chunk
+            if (!gotFirstChunk) {
+              typingEl.classList.remove('typing');
+              typingEl.innerHTML = '';
+              gotFirstChunk = true;
+            }
             content += line;
-            msgEl.textContent = content;
+            typingEl.textContent = content;
           }
         }
       }
 
-      if (!content) msgEl.textContent = '(No response)';
+      if (!content) typingEl.textContent = '(No response)';
     } catch (e) {
-      msgEl.textContent = `Error: ${e.message}`;
+      typingEl.classList.remove('typing');
+      typingEl.textContent = `Error: ${e.message}`;
     }
 
     this.streaming = false;
@@ -868,7 +1388,23 @@ const ChatTab = {
 
 /* ─── Conclusions Tab ─── */
 const ConclusionsTab = {
+  state: {
+    items: [],
+    offset: 0,
+    limit: 20,
+    allLoaded: false,
+    currentPeerId: null,
+  },
+
+  resetState() {
+    this.state.items = [];
+    this.state.offset = 0;
+    this.state.allLoaded = false;
+    this.state.currentPeerId = null;
+  },
+
   async render(el) {
+    this.resetState();
     el.innerHTML = `
       <div class="tab-header">
         <h2>Conclusions</h2>
@@ -899,23 +1435,41 @@ const ConclusionsTab = {
       const enabled = peerSelect.value !== '';
       searchInput.disabled = !enabled;
       searchBtn.disabled = !enabled;
-      if (enabled) this.loadConclusions(peerSelect.value);
+      if (enabled) {
+        this.resetState();
+        this.state.currentPeerId = peerSelect.value;
+        this.loadConclusions(peerSelect.value);
+      }
     });
   },
 
   async loadConclusions(peerId) {
     const ws = App.state.workspace;
     const results = document.getElementById('conclusion-results');
+    if (!results) return;
+
     results.innerHTML = '<div class="loading-overlay"><div class="spinner"></div> Loading...</div>';
 
     try {
       const data = await App.api(`workspaces/${ws.id}/conclusions/list`, {
-        body: { filters: { observer_id: peerId } }
+        body: {
+          filters: { observer_id: peerId },
+          limit: this.state.limit,
+          offset: this.state.offset,
+        }
       });
-      this.renderResults(results, data.items || []);
+      const newItems = data.items || [];
+      this.state.items = this.state.offset === 0 ? newItems : [...this.state.items, ...newItems];
+      this.state.allLoaded = newItems.length < this.state.limit;
+      this.renderResults(results, this.state.items);
     } catch {
       results.innerHTML = '<div class="text-sm text-muted">Failed to load conclusions</div>';
     }
+  },
+
+  async loadMore() {
+    this.state.offset = this.state.items.length;
+    await this.loadConclusions(this.state.currentPeerId);
   },
 
   async search() {
@@ -931,7 +1485,11 @@ const ConclusionsTab = {
       const items = await App.api(`workspaces/${ws.id}/conclusions/query`, {
         body: { query, top_k: 20, filters: { observer_id: peerId } }
       });
-      this.renderResults(results, Array.isArray(items) ? items : []);
+      const resultItems = Array.isArray(items) ? items : [];
+      this.state.items = resultItems;
+      this.state.allLoaded = true;
+      this.state.offset = 0;
+      this.renderResults(results, resultItems);
     } catch {
       results.innerHTML = '<div class="text-sm text-muted">Search failed</div>';
     }
@@ -947,13 +1505,20 @@ const ConclusionsTab = {
       return;
     }
 
+    const loadMoreHtml = this.state.allLoaded ? '' : `
+      <div class="load-more-wrap">
+        <button class="btn-load-more" data-action="load-more-conclusions">Load More</button>
+      </div>
+    `;
+
     container.innerHTML = `
       <div class="text-sm text-muted mb-3">${items.length} conclusion${items.length !== 1 ? 's' : ''}</div>
-      <div class="flex flex-col gap-2">
-        ${items.map(c => {
+      <div class="flex flex-col gap-2" id="conclusion-list">
+        ${items.map((c, idx) => {
           const type = this.guessType(c.content);
+          const cid = c.id || `c-${idx}`;
           return `
-            <div class="card">
+            <div class="card" data-conclusion-id="${App.escapeAttr(cid)}">
               <div class="card-header">
                 <div class="flex items-center gap-2">
                   <span class="conclusion-type ${type}">
@@ -962,6 +1527,7 @@ const ConclusionsTab = {
                   </span>
                   <span class="text-xs text-muted">${App.formatDate(c.created_at)}</span>
                 </div>
+                <button class="btn-delete-inline" data-action="delete-conclusion" data-id="${App.escapeAttr(cid)}" title="Delete conclusion">&times;</button>
               </div>
               <div style="font-size:12px;line-height:1.6;color:var(--text)">${App.escapeHtml(c.content)}</div>
               <div class="mt-2 flex gap-2">
@@ -972,7 +1538,31 @@ const ConclusionsTab = {
           `;
         }).join('')}
       </div>
+      ${loadMoreHtml}
     `;
+  },
+
+  async deleteItem(id, btnEl) {
+    const card = btnEl.closest('.card');
+    if (!card) return;
+    const ok = await App.softDelete('conclusion', id);
+    if (ok) {
+      card.style.transition = 'opacity 0.2s ease';
+      card.style.opacity = '0';
+      setTimeout(() => {
+        card.remove();
+        this.state.items = this.state.items.filter((c, i) => (c.id || `c-${i}`) !== id);
+        const list = document.getElementById('conclusion-list');
+        if (list && list.children.length === 0) {
+          const results = document.getElementById('conclusion-results');
+          results.innerHTML = `
+            <div class="empty-state">
+              <h3>No conclusions found</h3>
+              <p>Honcho hasn't drawn any conclusions about this peer yet</p>
+            </div>`;
+        }
+      }, 200);
+    }
   },
 
   guessType(content) {
@@ -985,7 +1575,25 @@ const ConclusionsTab = {
 
 /* ─── Messages Tab ─── */
 const MessagesTab = {
+  state: {
+    items: [],
+    offset: 0,
+    limit: 20,
+    allLoaded: false,
+    currentSessionId: null,
+    currentPeerFilter: null,
+  },
+
+  resetState() {
+    this.state.items = [];
+    this.state.offset = 0;
+    this.state.allLoaded = false;
+    this.state.currentSessionId = null;
+    this.state.currentPeerFilter = null;
+  },
+
   async render(el) {
+    this.resetState();
     el.innerHTML = `
       <div class="tab-header">
         <h2>Messages</h2>
@@ -1022,44 +1630,104 @@ const MessagesTab = {
       return;
     }
 
-    results.innerHTML = '<div class="loading-overlay"><div class="spinner"></div> Loading...</div>';
+    // Reset state when loading fresh
+    this.state.items = [];
+    this.state.offset = 0;
+    this.state.allLoaded = false;
+    this.state.currentSessionId = sessionId;
+    this.state.currentPeerFilter = peerFilter;
+
+    await this.fetchMessages();
+  },
+
+  async fetchMessages() {
+    const results = document.getElementById('msg-results');
+    if (!results) return;
+
     const ws = App.state.workspace;
+    const { currentSessionId, currentPeerFilter, offset, limit } = this.state;
+
+    if (this.state.offset === 0) {
+      results.innerHTML = '<div class="loading-overlay"><div class="spinner"></div> Loading...</div>';
+    }
 
     try {
       const filters = {};
-      if (peerFilter) filters.peer_id = peerFilter;
+      if (currentPeerFilter) filters.peer_id = currentPeerFilter;
 
-      const data = await App.api(`workspaces/${ws.id}/sessions/${sessionId}/messages/list`, {
-        body: { filters },
+      const data = await App.api(`workspaces/${ws.id}/sessions/${currentSessionId}/messages/list`, {
+        body: { filters, limit, offset },
       });
 
-      const messages = data.items || [];
+      const newMessages = data.items || [];
+      this.state.items = offset === 0 ? newMessages : [...this.state.items, ...newMessages];
+      this.state.allLoaded = newMessages.length < limit;
+      this.renderMessages(results, this.state.items);
+    } catch {
+      results.innerHTML = '<div class="text-sm text-muted">Failed to load messages</div>';
+    }
+  },
 
-      if (messages.length === 0) {
-        results.innerHTML = '<div class="text-sm text-muted">No messages found</div>';
-        return;
-      }
+  async loadMore() {
+    this.state.offset = this.state.items.length;
+    await this.fetchMessages();
+  },
 
-      results.innerHTML = `
-        <div class="text-sm text-muted mb-3">${messages.length} message${messages.length !== 1 ? 's' : ''}</div>
-        <div class="table-wrap" style="max-height:calc(100vh - 280px);overflow-y:auto">
-          <table>
-            <thead><tr><th>Peer</th><th>Content</th><th>Tokens</th><th>Time</th></tr></thead>
-            <tbody>
-              ${messages.map(m => `
-                <tr>
+  renderMessages(container, messages) {
+    if (messages.length === 0) {
+      container.innerHTML = '<div class="text-sm text-muted">No messages found</div>';
+      return;
+    }
+
+    const loadMoreHtml = this.state.allLoaded ? '' : `
+      <div class="load-more-wrap">
+        <button class="btn-load-more" data-action="load-more-messages">Load More</button>
+      </div>
+    `;
+
+    container.innerHTML = `
+      <div class="text-sm text-muted mb-3">${messages.length} message${messages.length !== 1 ? 's' : ''}</div>
+      <div class="table-wrap" style="max-height:calc(100vh - 280px);overflow-y:auto">
+        <table>
+          <thead><tr><th>Peer</th><th>Content</th><th>Tokens</th><th>Time</th><th></th></tr></thead>
+          <tbody>
+            ${messages.map((m, idx) => {
+              const mid = m.id || `m-${idx}`;
+              return `
+                <tr data-message-id="${App.escapeAttr(mid)}">
                   <td><code>${App.escapeHtml(m.peer_id)}</code></td>
                   <td class="truncate" title="${App.escapeHtml(m.content)}">${App.escapeHtml(m.content.substring(0, 150))}${m.content.length > 150 ? '...' : ''}</td>
                   <td class="mono">${m.token_count || '—'}</td>
                   <td class="mono">${App.formatDateTime(m.created_at)}</td>
+                  <td>
+                    <button class="btn-delete-inline" data-action="delete-message" data-id="${App.escapeAttr(mid)}" title="Delete message">&times;</button>
+                  </td>
                 </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      `;
-    } catch {
-      results.innerHTML = '<div class="text-sm text-muted">Failed to load messages</div>';
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${loadMoreHtml}
+    `;
+  },
+
+  async deleteItem(id, btnEl) {
+    const row = btnEl.closest('tr');
+    if (!row) return;
+    const ok = await App.softDelete('message', id);
+    if (ok) {
+      row.style.transition = 'opacity 0.2s ease';
+      row.style.opacity = '0';
+      setTimeout(() => {
+        row.remove();
+        this.state.items = this.state.items.filter((m, i) => (m.id || `m-${i}`) !== id);
+        const tbody = document.querySelector('#msg-results tbody');
+        if (tbody && tbody.children.length === 0) {
+          const results = document.getElementById('msg-results');
+          results.innerHTML = '<div class="text-sm text-muted">No messages found</div>';
+        }
+      }, 200);
     }
   }
 };

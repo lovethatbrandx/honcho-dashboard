@@ -11,17 +11,23 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from routes.settings import router as settings_router
+from routes.deletes import router as deletes_router
+from routes.notifications import router as notifications_router
+from routes.export import router as export_router
+from routes.security import (
+    RateLimitMiddleware,
+    RequestLoggingMiddleware,
+    RoleBasedAuthMiddleware,
+    EnhancedSecurityHeadersMiddleware,
+)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("hombre")
 
 HONCHO_URL = os.environ.get("HONCHO_URL", "http://localhost:8000")
 HONCHO_API_KEY = os.environ.get("HONCHO_API_KEY", "")
-DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "")
-DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 ALLOWED_REQUEST_HEADERS = {"content-type", "accept", "accept-encoding", "user-agent"}
 ALLOWED_RESPONSE_HEADERS = {"content-type", "content-length", "location"}
 VALID_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -30,54 +36,15 @@ static_dir = Path(__file__).parent / "static"
 _client: httpx.AsyncClient | None = None
 
 
-class BasicAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, username: str, password: str):
-        super().__init__(app)
-        self.username = username
-        self.password = password
-        self._401 = JSONResponse({"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": 'Basic realm="Hombre"'})
-
-    async def dispatch(self, request, call_next):
-        if not self.username or not self.password:
-            return await call_next(request)
-
-        if request.url.path.startswith("/static") or request.url.path == "/api/health":
-            return await call_next(request)
-
-        auth = request.headers.get("authorization", "")
-        if not auth.startswith("Basic "):
-            return self._401
-
-        try:
-            decoded = base64.b64decode(auth[6:]).decode("utf-8")
-            user, _, password = decoded.partition(":")
-            if hmac.compare_digest(user, self.username) and hmac.compare_digest(password, self.password):
-                return await call_next(request)
-        except Exception:
-            pass
-
-        return self._401
-
-
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; font-src fonts.googleapis.com fonts.gstatic.com; "
-            "style-src 'self' 'unsafe-inline' fonts.googleapis.com;"
-        )
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        return response
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _client
-    if not DASHBOARD_USER or not DASHBOARD_PASSWORD:
-        log.warning("DASHBOARD_USER/DASHBOARD_PASSWORD not set — authentication disabled")
+    from routes.security import _parse_users
+    users = _parse_users()
+    if not users:
+        log.warning("No auth configured — open access mode")
+    else:
+        log.info("Auth enabled: %d user(s) configured", len(users))
     default_headers = {}
     if HONCHO_API_KEY:
         default_headers["Authorization"] = f"Bearer {HONCHO_API_KEY}"
@@ -99,8 +66,12 @@ app = FastAPI(
     openapi_url=None,
 )
 
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(BasicAuthMiddleware, username=DASHBOARD_USER, password=DASHBOARD_PASSWORD)
+# Security middleware stack — order matters.
+# Outermost first: headers → logging → rate limiting → auth
+app.add_middleware(EnhancedSecurityHeadersMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RoleBasedAuthMiddleware)
 
 
 @app.get("/api/health")
@@ -117,6 +88,9 @@ async def health():
 
 
 app.include_router(settings_router)
+app.include_router(deletes_router)
+app.include_router(notifications_router)
+app.include_router(export_router)
 
 
 @app.post("/api/workspaces/{wid}/peers/{pid}/chat")
@@ -147,6 +121,99 @@ async def chat_stream(wid: str, pid: str, request: Request):
     except Exception as e:
         log.error("Chat stream error: %s", e)
         return JSONResponse({"error": "proxy_error"}, status_code=502)
+
+
+async def _honcho_post(path: str, body: dict | None = None) -> dict | list | None:
+    """Helper to POST to Honcho and return parsed JSON."""
+    try:
+        resp = await _client.post(f"/v3/{path}", json=body)
+        if resp.status_code >= 400:
+            log.warning("Honcho error %d on POST %s", resp.status_code, path)
+            return None
+        return resp.json()
+    except Exception as e:
+        log.error("Honcho request failed POST %s: %s", path, e)
+        return None
+
+
+@app.post("/api/workspaces/{wid}/conclusions/list/all")
+async def list_all_conclusions(wid: str):
+    """Fetch ALL conclusions for a workspace by paginating through them.
+    Honcho typically returns paginated results; this endpoint collects them all."""
+    if not VALID_ID.match(wid):
+        return JSONResponse({"error": "invalid_id"}, status_code=400)
+
+    all_conclusions = []
+    cursor = None
+    limit = 100
+    max_pages = 50  # safety limit: 50 pages * 100 = 5000 conclusions max
+
+    for _ in range(max_pages):
+        body = {"limit": limit}
+        if cursor:
+            body["cursor"] = cursor
+
+        result = await _honcho_post(f"workspaces/{wid}/conclusions/list", body)
+        if result is None:
+            break
+
+        # Handle different response shapes
+        if isinstance(result, list):
+            all_conclusions.extend(result)
+            if len(result) < limit:
+                break
+            # If we got exactly limit items, try to get more (offset-based pagination)
+            if not cursor:
+                body["offset"] = len(all_conclusions)
+        elif isinstance(result, dict):
+            items = result.get("conclusions", result.get("items", result.get("results", [])))
+            all_conclusions.extend(items)
+            cursor = result.get("cursor") or result.get("next_cursor")
+            if not cursor or len(items) < limit:
+                break
+        else:
+            break
+
+    return {"conclusions": all_conclusions, "count": len(all_conclusions)}
+
+
+@app.post("/api/workspaces/{wid}/sessions/{sid}/messages/list/all")
+async def list_all_messages(wid: str, sid: str):
+    """Fetch ALL messages for a session by paginating through them."""
+    if not VALID_ID.match(wid) or not VALID_ID.match(sid):
+        return JSONResponse({"error": "invalid_id"}, status_code=400)
+
+    all_messages = []
+    cursor = None
+    limit = 100
+    max_pages = 50
+
+    for _ in range(max_pages):
+        body = {"limit": limit}
+        if cursor:
+            body["cursor"] = cursor
+
+        result = await _honcho_post(f"workspaces/{wid}/sessions/{sid}/messages/list", body)
+        if result is None:
+            break
+
+        if isinstance(result, list):
+            all_messages.extend(result)
+            if len(result) < limit:
+                break
+            # If we got exactly limit items, try to get more (offset-based pagination)
+            if not cursor:
+                body["offset"] = len(all_messages)
+        elif isinstance(result, dict):
+            items = result.get("messages", result.get("items", result.get("results", [])))
+            all_messages.extend(items)
+            cursor = result.get("cursor") or result.get("next_cursor")
+            if not cursor or len(items) < limit:
+                break
+        else:
+            break
+
+    return {"messages": all_messages, "count": len(all_messages)}
 
 
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])

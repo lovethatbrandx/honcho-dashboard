@@ -69,6 +69,19 @@
       </nav>
 
       <div class="sidebar-footer">
+        <div class="notification-bell" id="notification-bell" role="button" tabindex="0" aria-label="Notifications">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <span class="notification-badge hidden" id="notification-badge">0</span>
+        </div>
+        <div class="notification-panel hidden" id="notification-panel">
+          <div class="notification-panel-header">
+            <span class="text-sm font-medium">Notifications</span>
+            <button class="btn btn-ghost btn-sm" id="notification-clear">Clear all</button>
+          </div>
+          <div class="notification-list" id="notification-list">
+            <div class="text-xs text-muted" style="padding:12px;text-align:center">No notifications</div>
+          </div>
+        </div>
         <div class="flex items-center gap-2">
           <span class="health-dot" id="health-dot"></span>
           <span class="health-text" id="health-text">Checking...</span>

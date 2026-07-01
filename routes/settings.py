@@ -3,9 +3,10 @@ import re
 import asyncio
 import shutil
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 log = logging.getLogger("hombre")
@@ -49,6 +50,40 @@ WRITABLE_KEYS = {
     "DREAM_INDUCTION_MODEL_CONFIG__OVERRIDES__BASE_URL",
     "DREAM_INDUCTION_MODEL_CONFIG__TRANSPORT",
 }
+
+# ---------------------------------------------------------------------------
+# Audit logging
+# ---------------------------------------------------------------------------
+
+AUDIT_LOG_DIR = Path(os.environ.get("HOMBRE_LOG_DIR", "logs"))
+AUDIT_LOG_FILE = AUDIT_LOG_DIR / "audit.log"
+
+
+def _audit(action: str, user: str = "", detail: str = "") -> None:
+    """Append an audit entry to the audit log."""
+    AUDIT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    parts = [now, action]
+    if user:
+        parts.append(f"user={user}")
+    if detail:
+        parts.append(detail)
+    line = " ".join(parts) + "\n"
+    try:
+        with open(AUDIT_LOG_FILE, "a") as f:
+            f.write(line)
+    except OSError as e:
+        log.warning("Failed to write audit log: %s", e)
+
+
+def _get_user(request: Request) -> str:
+    """Extract username from request.state (set by auth middleware)."""
+    return getattr(getattr(request, "state", None), "user", "") or "anonymous"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _require_env_path():
     if not HONCHO_ENV_PATH:
@@ -112,9 +147,11 @@ class SettingsWriteRequest(BaseModel):
 
 
 @router.get("/read")
-async def read_settings():
+async def read_settings(request: Request):
     _require_env_path()
+    user = _get_user(request)
     env = parse_env_file(HONCHO_ENV_PATH)
+    _audit("settings.read", user=user)
     sections = {
         "llm": {
             "LLM_OPENAI_API_KEY": env.get("LLM_OPENAI_API_KEY", ""),
@@ -181,38 +218,47 @@ async def read_settings():
 
 
 @router.post("/write")
-async def write_settings(req: SettingsWriteRequest):
+async def write_settings(req: SettingsWriteRequest, request: Request):
     _require_env_path()
+    user = _get_user(request)
+    changed_keys = list(req.settings.keys())
     write_env_file(HONCHO_ENV_PATH, req.settings)
+    _audit("settings.write", user=user, detail=f"keys={changed_keys}")
     return {"status": "ok", "env_path": HONCHO_ENV_PATH}
 
 
 @router.post("/backup")
-async def create_backup():
+async def create_backup(request: Request):
     _require_env_path()
+    user = _get_user(request)
     env_path = Path(HONCHO_ENV_PATH)
     if not env_path.exists():
         raise HTTPException(status_code=404, detail="env_file_not_found")
     backup_path = env_path.parent / (env_path.name + ".bak")
     shutil.copy2(env_path, backup_path)
+    _audit("settings.backup", user=user)
     return {"status": "backed up"}
 
 
 @router.post("/restore")
-async def restore_backup():
+async def restore_backup(request: Request):
     _require_env_path()
+    user = _get_user(request)
     env_path = Path(HONCHO_ENV_PATH)
     backup_path = env_path.parent / (env_path.name + ".bak")
     if not backup_path.exists():
         raise HTTPException(status_code=404, detail="backup_not_found")
     shutil.copy2(backup_path, env_path)
+    _audit("settings.restore", user=user)
     return {"status": "restored"}
 
 
 @router.post("/restart")
-async def restart_containers():
+async def restart_containers(request: Request):
     _require_env_path()
     _require_compose_dir()
+    user = _get_user(request)
+    _audit("settings.restart", user=user)
     try:
         proc = await asyncio.create_subprocess_exec(
             "docker", "compose", "up", "-d", "--force-recreate",
