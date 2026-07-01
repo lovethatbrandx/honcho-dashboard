@@ -31,6 +31,7 @@ Built entirely with AI coding tools ([OpenCode](https://opencode.ai) + [MiMo](ht
 - **Conclusions** — browse and semantic search reasoning/memory with pagination and type filtering
 - **Messages** — browse messages across all sessions with pagination
 - **Settings** — configure LLM providers, embedding models, dialectic levels, and more
+- **Workspace Merge** — merge two workspaces with conflict detection and resolution
 
 ### Additional Features
 

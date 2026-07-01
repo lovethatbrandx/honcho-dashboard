@@ -22,6 +22,7 @@ from pydantic import BaseModel
 log = logging.getLogger("hombre")
 
 router = APIRouter(prefix="/api/export", tags=["export"])
+workspace_router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
 EXPORT_VERSION = "1.0"
 VALID_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -259,6 +260,270 @@ class ImportConfirmRequest(BaseModel):
     data: dict
     id_mapping: dict[str, str] | None = None  # old_id -> new_id for conflicts
     conflict_strategy: str = "skip"  # skip | overwrite | rename
+
+
+class MergeRequest(BaseModel):
+    source_workspace_id: str
+    target_workspace_id: str
+    conflict_strategy: str = "rename"  # skip | rename | overwrite
+
+
+# ─── Workspace Helpers ────────────────────────────────────────────────────
+
+
+async def _workspace_exists(wid: str) -> bool:
+    """Check if a workspace exists by listing all workspaces."""
+    try:
+        ws_data = await _honcho_request("POST", "/v3/workspaces/list", {"filters": {}})
+        return any(w.get("id") == wid for w in ws_data.get("items", []))
+    except HTTPException:
+        return False
+
+
+async def _fetch_peers(wid: str) -> list[dict]:
+    """Fetch all peers from a workspace."""
+    try:
+        data = await _honcho_request("POST", f"/v3/workspaces/{wid}/peers/list", {"filters": {}})
+        return data.get("items", [])
+    except HTTPException:
+        return []
+
+
+async def _fetch_sessions(wid: str) -> list[dict]:
+    """Fetch all sessions from a workspace."""
+    try:
+        data = await _honcho_request("POST", f"/v3/workspaces/{wid}/sessions/list", {"filters": {}})
+        return data.get("items", [])
+    except HTTPException:
+        return []
+
+
+def _resolve_conflict_id(base_id: str, existing_ids: set[str], suffix: str = "merged") -> str:
+    """Generate a unique ID by appending a suffix with incrementing counter."""
+    candidate = f"{base_id}-{suffix}"
+    counter = 1
+    while candidate in existing_ids:
+        candidate = f"{base_id}-{suffix}-{counter}"
+        counter += 1
+    return candidate
+
+
+# ─── Merge Preview ────────────────────────────────────────────────────────
+
+
+@workspace_router.post("/merge/preview")
+async def merge_preview(req: MergeRequest):
+    """Preview what a merge would do without actually merging anything.
+
+    Shows conflict count, non-conflicting peers, and detailed conflict info.
+    """
+    if req.conflict_strategy not in ("skip", "rename", "overwrite"):
+        raise HTTPException(status_code=400, detail="conflict_strategy_must_be_skip_rename_or_overwrite")
+
+    if not VALID_ID.match(req.source_workspace_id) or not VALID_ID.match(req.target_workspace_id):
+        raise HTTPException(status_code=400, detail="invalid_workspace_id")
+
+    if req.source_workspace_id == req.target_workspace_id:
+        raise HTTPException(status_code=400, detail="source_and_target_must_differ")
+
+    log.info("Merge preview: %s -> %s (strategy: %s)", req.source_workspace_id, req.target_workspace_id, req.conflict_strategy)
+
+    # Validate both workspaces exist
+    if not await _workspace_exists(req.source_workspace_id):
+        raise HTTPException(status_code=404, detail=f"source_workspace_not_found: {req.source_workspace_id}")
+    if not await _workspace_exists(req.target_workspace_id):
+        raise HTTPException(status_code=404, detail=f"target_workspace_not_found: {req.target_workspace_id}")
+
+    # Fetch peers from both workspaces
+    source_peers = await _fetch_peers(req.source_workspace_id)
+    target_peers = await _fetch_peers(req.target_workspace_id)
+
+    source_peer_ids = {p.get("id", "") for p in source_peers if p.get("id")}
+    target_peer_ids = {p.get("id", "") for p in target_peers if p.get("id")}
+
+    conflicts = sorted(source_peer_ids & target_peer_ids)
+    non_conflicting = sorted(source_peer_ids - target_peer_ids)
+
+    # Build conflict details with creation dates
+    source_peer_map = {p.get("id", ""): p for p in source_peers}
+    target_peer_map = {p.get("id", ""): p for p in target_peers}
+
+    conflict_details = []
+    for cid in conflicts:
+        sp = source_peer_map.get(cid, {})
+        tp = target_peer_map.get(cid, {})
+        conflict_details.append({
+            "id": cid,
+            "source_created": sp.get("created_at", sp.get("createdAt", "unknown")),
+            "target_created": tp.get("created_at", tp.get("createdAt", "unknown")),
+        })
+
+    # Preview sessions too
+    source_sessions = await _fetch_sessions(req.source_workspace_id)
+    target_sessions = await _fetch_sessions(req.target_workspace_id)
+
+    source_session_ids = {s.get("id", "") for s in source_sessions if s.get("id")}
+    target_session_ids = {s.get("id", "") for s in target_sessions if s.get("id")}
+
+    session_conflicts = sorted(source_session_ids & target_session_ids)
+
+    result = {
+        "source_peers": len(source_peer_ids),
+        "target_peers": len(target_peer_ids),
+        "peers_non_conflicting": len(non_conflicting),
+        "peers_conflicting": len(conflicts),
+        "conflicts": conflicts,
+        "conflict_details": conflict_details,
+        "non_conflicting": non_conflicting,
+        "sessions_non_conflicting": len(source_session_ids - target_session_ids),
+        "sessions_conflicting": len(session_conflicts),
+        "session_conflicts": session_conflicts,
+    }
+
+    log.info(
+        "Merge preview: %d source peers, %d target peers, %d peer conflicts, %d session conflicts",
+        len(source_peer_ids), len(target_peer_ids), len(conflicts), len(session_conflicts),
+    )
+    return result
+
+
+# ─── Merge Execute ────────────────────────────────────────────────────────
+
+
+@workspace_router.post("/merge")
+async def merge_workspaces(req: MergeRequest):
+    """Merge source workspace into target workspace with conflict detection.
+
+    Handles peer and session merging based on the chosen conflict strategy:
+    - skip:     don't copy conflicting items
+    - rename:   add -merged suffix (-merged-1, -merged-2, etc.)
+    - overwrite: replace target item data
+    """
+    if req.conflict_strategy not in ("skip", "rename", "overwrite"):
+        raise HTTPException(status_code=400, detail="conflict_strategy_must_be_skip_rename_or_overwrite")
+
+    if not VALID_ID.match(req.source_workspace_id) or not VALID_ID.match(req.target_workspace_id):
+        raise HTTPException(status_code=400, detail="invalid_workspace_id")
+
+    if req.source_workspace_id == req.target_workspace_id:
+        raise HTTPException(status_code=400, detail="source_and_target_must_differ")
+
+    log.info("Merging workspace %s -> %s (strategy: %s)", req.source_workspace_id, req.target_workspace_id, req.conflict_strategy)
+
+    # Validate both workspaces exist
+    if not await _workspace_exists(req.source_workspace_id):
+        raise HTTPException(status_code=404, detail=f"source_workspace_not_found: {req.source_workspace_id}")
+    if not await _workspace_exists(req.target_workspace_id):
+        raise HTTPException(status_code=404, detail=f"target_workspace_not_found: {req.target_workspace_id}")
+
+    strategy = req.conflict_strategy
+    source_wid = req.source_workspace_id
+    target_wid = req.target_workspace_id
+
+    report = {
+        "status": "complete",
+        "source": source_wid,
+        "target": target_wid,
+        "peers_copied": 0,
+        "peers_skipped": 0,
+        "peers_renamed": 0,
+        "sessions_copied": 0,
+        "sessions_skipped": 0,
+        "sessions_renamed": 0,
+        "conflicts": [],
+        "errors": [],
+    }
+
+    # ── Phase 1: Merge Peers ──────────────────────────────────────────────
+    source_peers = await _fetch_peers(source_wid)
+    target_peers = await _fetch_peers(target_wid)
+
+    source_peer_ids = {p.get("id", "") for p in source_peers if p.get("id")}
+    target_peer_ids = {p.get("id", "") for p in target_peers if p.get("id")}
+
+    peer_conflicts = sorted(source_peer_ids & target_peer_ids)
+    report["conflicts"] = peer_conflicts
+
+    # Build set of target IDs we'll be working with (may grow if renaming)
+    active_target_ids = set(target_peer_ids)
+
+    for peer in source_peers:
+        pid = peer.get("id", "")
+        if not pid:
+            continue
+
+        is_conflict = pid in target_peer_ids
+
+        if is_conflict:
+            if strategy == "skip":
+                report["peers_skipped"] += 1
+                log.info("Skipping conflicting peer: %s", pid)
+                continue
+            elif strategy == "rename":
+                new_id = _resolve_conflict_id(pid, active_target_ids, suffix="merged")
+                active_target_ids.add(new_id)
+                report["peers_renamed"] += 1
+            else:  # overwrite
+                new_id = pid
+        else:
+            new_id = pid
+
+        # Create the peer in target workspace
+        try:
+            await _honcho_request("POST", f"/v3/workspaces/{target_wid}/peers/create", {"id": new_id})
+            report["peers_copied"] += 1
+            log.info("Merged peer: %s -> %s%s", pid, new_id, " (renamed)" if is_conflict and strategy == "rename" else "")
+        except HTTPException as e:
+            report["errors"].append(f"peer '{pid}': {e.detail}")
+            log.warning("Failed to merge peer %s: %s", pid, e.detail)
+
+    # ── Phase 2: Merge Sessions ───────────────────────────────────────────
+    source_sessions = await _fetch_sessions(source_wid)
+    target_sessions = await _fetch_sessions(target_wid)
+
+    source_session_ids = {s.get("id", "") for s in source_sessions if s.get("id")}
+    target_session_ids = {s.get("id", "") for s in target_sessions if s.get("id")}
+
+    session_conflicts = source_session_ids & target_session_ids
+    active_target_session_ids = set(target_session_ids)
+
+    for session in source_sessions:
+        sid = session.get("id", "")
+        if not sid:
+            continue
+
+        is_conflict = sid in target_session_ids
+
+        if is_conflict:
+            if strategy == "skip":
+                report["sessions_skipped"] += 1
+                log.info("Skipping conflicting session: %s", sid)
+                continue
+            elif strategy == "rename":
+                new_id = _resolve_conflict_id(sid, active_target_session_ids, suffix="merged")
+                active_target_session_ids.add(new_id)
+                report["sessions_renamed"] += 1
+            else:  # overwrite
+                new_id = sid
+        else:
+            new_id = sid
+
+        # Create the session in target workspace
+        try:
+            await _honcho_request("POST", f"/v3/workspaces/{target_wid}/sessions/create", {"id": new_id})
+            report["sessions_copied"] += 1
+            log.info("Merged session: %s -> %s%s", sid, new_id, " (renamed)" if is_conflict and strategy == "rename" else "")
+        except HTTPException as e:
+            report["errors"].append(f"session '{sid}': {e.detail}")
+            log.warning("Failed to merge session %s: %s", sid, e.detail)
+
+    log.info(
+        "Merge complete: peers copied=%d skipped=%d renamed=%d | sessions copied=%d skipped=%d renamed=%d | errors=%d",
+        report["peers_copied"], report["peers_skipped"], report["peers_renamed"],
+        report["sessions_copied"], report["sessions_skipped"], report["sessions_renamed"],
+        len(report["errors"]),
+    )
+    return report
 
 
 @router.post("/import/workspace")

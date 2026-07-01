@@ -16,6 +16,7 @@ from routes.settings import router as settings_router
 from routes.deletes import router as deletes_router
 from routes.notifications import router as notifications_router
 from routes.export import router as export_router
+from routes.export import workspace_router as workspace_router
 from routes.security import (
     RateLimitMiddleware,
     RequestLoggingMiddleware,
@@ -100,6 +101,7 @@ app.include_router(settings_router)
 app.include_router(deletes_router)
 app.include_router(notifications_router)
 app.include_router(export_router)
+app.include_router(workspace_router)
 
 
 @app.post("/api/workspaces/{wid}/peers/{pid}/chat")

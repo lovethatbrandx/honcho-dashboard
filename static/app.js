@@ -1877,6 +1877,13 @@ const MessagesTab = {
 const SettingsTab = {
   dirty: {},
   original: {},
+  mergeState: {
+    sourceWorkspace: '',
+    targetWorkspace: '',
+    conflictStrategy: 'rename',
+    previewResult: null,
+    canExecute: false,
+  },
 
   async render(el) {
     el.innerHTML = `
@@ -1974,6 +1981,9 @@ const SettingsTab = {
       `;
     }
 
+    // Workspace Merge section (between advanced and sticky bar)
+    html += this.renderMergeSection();
+
     html += `
       <div class="settings-sticky-bar">
         <button class="btn btn-ghost" data-action="settings-backup">Create Backup</button>
@@ -2059,6 +2069,216 @@ const SettingsTab = {
     }
 
     return '';
+  },
+
+  renderMergeSection() {
+    const workspaces = App.state.workspaces;
+    const ms = this.mergeState;
+
+    const wsOptions = workspaces.map(w =>
+      `<option value="${App.escapeAttr(w.id)}">${App.escapeHtml(w.id)}</option>`
+    ).join('');
+
+    const strategyOptions = [
+      { value: 'skip', label: 'Skip (don\'t merge conflicting items)' },
+      { value: 'rename', label: 'Rename (add -merged suffix)' },
+      { value: 'overwrite', label: 'Overwrite (replace target data)' },
+    ];
+
+    const strategyRadios = strategyOptions.map(opt => `
+      <label class="merge-strategy-option">
+        <input type="radio" name="merge-strategy" value="${opt.value}" ${ms.conflictStrategy === opt.value ? 'checked' : ''}>
+        <span>${opt.label}</span>
+      </label>
+    `).join('');
+
+    const previewHtml = ms.previewResult ? this.renderMergePreview(ms.previewResult) : '';
+
+    return `
+      <div class="accordion" data-section="merge">
+        <div class="accordion-header" data-action="toggle-accordion">
+          <div class="flex items-center gap-2">
+            <span>🔀 Workspace Merge</span>
+          </div>
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="accordion-body">
+          <div class="accordion-content">
+            <div class="merge-warning">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+              <span>Merging workspaces is a destructive operation. Preview before executing.</span>
+            </div>
+
+            <div class="merge-fields">
+              <div class="settings-field">
+                <label>Source Workspace</label>
+                <select class="input" id="merge-source-ws" aria-label="Source workspace">
+                  <option value="">Select source...</option>
+                  ${wsOptions}
+                </select>
+              </div>
+
+              <div class="settings-field">
+                <label>Target Workspace</label>
+                <select class="input" id="merge-target-ws" aria-label="Target workspace">
+                  <option value="">Select target...</option>
+                  ${wsOptions}
+                </select>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label>Conflict Strategy</label>
+              <div class="merge-strategy-list">
+                ${strategyRadios}
+              </div>
+            </div>
+
+            <div class="merge-actions">
+              <button class="btn btn-ghost" data-action="merge-preview" id="merge-preview-btn">Preview Merge</button>
+              <button class="btn btn-primary" data-action="merge-execute" id="merge-execute-btn" disabled style="background:var(--destructive);color:#fff">Execute Merge</button>
+            </div>
+
+            <div id="merge-preview-results">
+              ${previewHtml}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderMergePreview(result) {
+    if (!result) return '';
+
+    const conflictHtml = result.conflicts && result.conflicts.length > 0
+      ? `<div class="merge-preview-conflicts">
+           <div class="text-xs font-medium" style="color:var(--amber)">Conflicts:</div>
+           <div class="merge-conflict-list">
+             ${result.conflicts.map(c => `<code>${App.escapeHtml(c)}</code>`).join(', ')}
+           </div>
+         </div>`
+      : '<div class="text-xs" style="color:var(--green)">No conflicts detected</div>';
+
+    return `
+      <div class="merge-preview-box">
+        <div class="merge-preview-header">Preview Results</div>
+        <div class="merge-preview-stats">
+          <div class="merge-stat">
+            <span class="merge-stat-label">Source:</span>
+            <span>${result.source_peers || 0} peers, ${result.source_sessions || 0} sessions</span>
+          </div>
+          <div class="merge-stat">
+            <span class="merge-stat-label">Target:</span>
+            <span>${result.target_peers || 0} peers, ${result.target_sessions || 0} sessions</span>
+          </div>
+          <div class="merge-stat">
+            <span class="merge-stat-label">Non-conflicting:</span>
+            <span>${result.non_conflicting || 0} items to copy</span>
+          </div>
+        </div>
+        ${conflictHtml}
+      </div>
+    `;
+  },
+
+  async previewMerge() {
+    const sourceId = document.getElementById('merge-source-ws')?.value;
+    const targetId = document.getElementById('merge-target-ws')?.value;
+    const strategy = document.querySelector('input[name="merge-strategy"]:checked')?.value || 'rename';
+
+    if (!sourceId || !targetId) {
+      App.toast('Select both source and target workspaces', 'warning');
+      return;
+    }
+    if (sourceId === targetId) {
+      App.toast('Source and target must be different', 'warning');
+      return;
+    }
+
+    const previewBtn = document.getElementById('merge-preview-btn');
+    const executeBtn = document.getElementById('merge-execute-btn');
+    const resultsDiv = document.getElementById('merge-preview-results');
+
+    previewBtn.disabled = true;
+    previewBtn.textContent = 'Previewing...';
+    resultsDiv.innerHTML = '<div class="loading-overlay"><div class="spinner"></div> Loading preview...</div>';
+
+    try {
+      const result = await App.api('workspaces/merge/preview', {
+        body: {
+          source_workspace_id: sourceId,
+          target_workspace_id: targetId,
+          conflict_strategy: strategy,
+        }
+      });
+
+      this.mergeState.previewResult = result;
+      this.mergeState.canExecute = true;
+      this.mergeState.sourceWorkspace = sourceId;
+      this.mergeState.targetWorkspace = targetId;
+      this.mergeState.conflictStrategy = strategy;
+
+      resultsDiv.innerHTML = this.renderMergePreview(result);
+      executeBtn.disabled = false;
+
+      previewBtn.textContent = 'Preview Merge';
+      previewBtn.disabled = false;
+    } catch (e) {
+      resultsDiv.innerHTML = `<div class="text-sm" style="color:var(--destructive)">Preview failed: ${App.escapeHtml(e.message)}</div>`;
+      previewBtn.textContent = 'Preview Merge';
+      previewBtn.disabled = false;
+      executeBtn.disabled = true;
+    }
+  },
+
+  async executeMerge() {
+    const ms = this.mergeState;
+    if (!ms.canExecute || !ms.sourceWorkspace || !ms.targetWorkspace) {
+      App.toast('Run a preview first', 'warning');
+      return;
+    }
+
+    const executeBtn = document.getElementById('merge-execute-btn');
+    const resultsDiv = document.getElementById('merge-preview-results');
+
+    Modal.confirm(
+      'Execute Workspace Merge',
+      `Merge "${ms.sourceWorkspace}" into "${ms.targetWorkspace}" using "${ms.conflictStrategy}" strategy? This cannot be undone.`,
+      async () => {
+        executeBtn.disabled = true;
+        executeBtn.textContent = 'Merging...';
+        resultsDiv.innerHTML = '<div class="loading-overlay"><div class="spinner"></div> Merging workspaces...</div>';
+
+        try {
+          const result = await App.api('workspaces/merge', {
+            body: {
+              source_workspace_id: ms.sourceWorkspace,
+              target_workspace_id: ms.targetWorkspace,
+              conflict_strategy: ms.conflictStrategy,
+            }
+          });
+
+          // Reset merge state
+          ms.previewResult = null;
+          ms.canExecute = false;
+
+          resultsDiv.innerHTML = '';
+          executeBtn.textContent = 'Execute Merge';
+          executeBtn.disabled = true;
+
+          App.toast('Merge completed successfully', 'success');
+
+          // Refresh workspace data
+          await App.loadWorkspaces();
+          App.renderTab(App.state.activeTab);
+        } catch (e) {
+          resultsDiv.innerHTML = `<div class="text-sm" style="color:var(--destructive)">Merge failed: ${App.escapeHtml(e.message)}</div>`;
+          executeBtn.textContent = 'Execute Merge';
+          executeBtn.disabled = false;
+        }
+      }
+    );
   },
 
   renderField(key, value) {
@@ -2152,6 +2372,10 @@ const SettingsTab = {
     el.querySelector('[data-action="settings-apply"]')?.addEventListener('click', () => this.applyAndRestart(el));
     el.querySelector('[data-action="settings-backup"]')?.addEventListener('click', () => this.backup(el));
     el.querySelector('[data-action="settings-restore"]')?.addEventListener('click', () => this.restore(el));
+
+    // Merge event handlers
+    el.querySelector('[data-action="merge-preview"]')?.addEventListener('click', () => this.previewMerge());
+    el.querySelector('[data-action="merge-execute"]')?.addEventListener('click', () => this.executeMerge());
   },
 
   updateDirtyIndicators(el) {

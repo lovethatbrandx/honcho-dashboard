@@ -105,6 +105,10 @@ node --check static/app.js
 - `POST /api/export/import/workspace` — Upload JSON export file for preview and conflict detection (multipart form)
 - `POST /api/export/import/confirm` — Confirm import with conflict resolution (body: `{workspace_id, data, id_mapping, conflict_strategy}`)
 
+### Workspace Merge (`routes/export.py`)
+- `POST /api/workspaces/merge/preview` — Preview merge conflicts (body: `{source_workspace_id, target_workspace_id, conflict_strategy}`)
+- `POST /api/workspaces/merge` — Execute merge with conflict resolution (body: `{source_workspace_id, target_workspace_id, conflict_strategy}`)
+
 ### Supabase Auth (`routes/security.py` — when Supabase configured)
 - `GET /api/auth/status` — Check if Supabase is configured and get current user
 - `POST /api/auth/login` — Login with email/password (body: `{email, password}`)
